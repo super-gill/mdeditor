@@ -214,6 +214,26 @@
             padding: 6px 8px;
         }
 
+        body.drag-over .panel {
+            outline: 2px dashed #3b5bd6;
+            outline-offset: -4px;
+        }
+
+        body.drag-over::after {
+            content: "Drop .md file to open";
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: 600;
+            color: #8fb0ff;
+            background: rgba(11, 16, 32, 0.75);
+            z-index: 100;
+            pointer-events: none;
+        }
+
         .preview h1,
         .preview h2,
         .preview h3 {
@@ -268,15 +288,11 @@
                 <button id="toggleBtn" type="button">Preview</button>
                 <input id="filename" type="text" value="notes.md" aria-label="Filename" />
 
-                <button id="exportBtn" type="button">Export .md</button>
-
-                <button id="openFsBtn" type="button">Open file</button>
-                <button id="saveFsBtn" type="button" disabled>Save</button>
-                <button id="saveAsFsBtn" type="button" disabled>Save As</button>
+                <button id="openBtn" type="button">Open</button>
+                <button id="saveBtn" type="button">Save</button>
+                <button id="saveAsBtn" type="button">Save As</button>
 
                 <input id="fileInput" type="file" accept=".md,.markdown,.txt" style="display:none" />
-                <button id="loadBtn" type="button" title="Fallback loader (no autosave-to-disk)">Load
-                    (fallback)</button>
 
                 <button id="clearBtn" type="button">Clear</button>
             </div>
@@ -315,19 +331,17 @@
         const editor = document.getElementById("editor");
         const preview = document.getElementById("preview");
         const toggleBtn = document.getElementById("toggleBtn");
-        const exportBtn = document.getElementById("exportBtn");
         const clearBtn = document.getElementById("clearBtn");
         const filenameInput = document.getElementById("filename");
         const outlineList = document.getElementById("outlineList");
         const headerEl = document.getElementById("appHeader");
         const rootEl = document.documentElement;
 
-        const loadBtn = document.getElementById("loadBtn");
         const fileInput = document.getElementById("fileInput");
 
-        const openFsBtn = document.getElementById("openFsBtn");
-        const saveFsBtn = document.getElementById("saveFsBtn");
-        const saveAsFsBtn = document.getElementById("saveAsFsBtn");
+        const openBtn = document.getElementById("openBtn");
+        const saveBtn = document.getElementById("saveBtn");
+        const saveAsBtn = document.getElementById("saveAsBtn");
         const saveStatus = document.getElementById("saveStatus");
         const contextHint = document.getElementById("contextHint");
 
@@ -343,18 +357,11 @@
 
         function setStatus(text) { saveStatus.textContent = text; }
 
-        function updateFsButtons() {
-            const canUseFS = FS_SUPPORTED && SECURE;
-            openFsBtn.disabled = !canUseFS;
-            if (!canUseFS) {
-                openFsBtn.title = !FS_SUPPORTED ? "Not supported in this browser" : "Requires https:// or http://localhost";
-            } else {
-                openFsBtn.title = "Open a file (autosave supported)";
-            }
+        const canUseFS = FS_SUPPORTED && SECURE;
 
-            const hasHandle = !!openedFileHandle;
-            saveFsBtn.disabled = !hasHandle;
-            saveAsFsBtn.disabled = !canUseFS;
+        function updateButtons() {
+            openBtn.title = canUseFS ? "Open a file (autosave supported)" : "Open a file";
+            saveAsBtn.title = canUseFS ? "Save to a new file" : "Download as .md";
         }
 
         // ---------- Draft save/load ----------
@@ -547,43 +554,48 @@
             URL.revokeObjectURL(url);
         }
 
-        // ---------- File System Access: open/save/save as ----------
-        async function openFileFs() {
-            log("Open clicked. supported=", FS_SUPPORTED, "secure=", SECURE);
-            if (!FS_SUPPORTED || !SECURE) {
-                setStatus("Open blocked: needs https:// or http://localhost");
-                return;
-            }
-            try {
-                const [handle] = await window.showOpenFilePicker({
-                    multiple: false,
-                    types: [{
-                        description: "Markdown",
-                        accept: { "text/markdown": [".md", ".markdown"], "text/plain": [".txt"] }
-                    }]
-                });
+        // ---------- Load file content (shared by all open methods) ----------
+        function loadFileContent(text, name, handle) {
+            editor.value = text;
+            filenameInput.value = sanitizeFilename(name || "notes.md");
+            openedFileHandle = handle || null;
+            lastSavedText = handle ? text : "";
+            saveDraft();
+            scheduleUiUpdate();
+            updateButtons();
 
-                if (!handle) return;
-
-                const file = await handle.getFile();
-                const text = await file.text();
-
-                openedFileHandle = handle;
-                editor.value = text;
-                lastSavedText = text;
-
-                filenameInput.value = sanitizeFilename(file.name || "notes.md");
-                saveDraft();
-                scheduleUiUpdate();
-
-                setStatus(`Opened: ${file.name} (autosave on)`);
-                updateFsButtons();
-            } catch (e) {
-                if (e?.name === "AbortError") { log("Open cancelled"); return; }
-                errlog(e, "Open");
+            if (handle) {
+                setStatus(`Opened: ${name} (autosave on)`);
+            } else {
+                setStatus(`Loaded: ${name}`);
             }
         }
 
+        // ---------- Open: FS API with file-input fallback ----------
+        async function openFile() {
+            if (canUseFS) {
+                try {
+                    const [handle] = await window.showOpenFilePicker({
+                        multiple: false,
+                        types: [{
+                            description: "Markdown",
+                            accept: { "text/markdown": [".md", ".markdown"], "text/plain": [".txt"] }
+                        }]
+                    });
+                    if (!handle) return;
+                    const file = await handle.getFile();
+                    loadFileContent(await file.text(), file.name, handle);
+                } catch (e) {
+                    if (e?.name === "AbortError") return;
+                    errlog(e, "Open");
+                }
+            } else {
+                // Fallback: trigger hidden file input
+                fileInput.click();
+            }
+        }
+
+        // ---------- Save: write-back or download ----------
         async function writeToHandle(handle, text) {
             const writable = await handle.createWritable();
             await writable.write(text);
@@ -591,7 +603,7 @@
         }
 
         async function saveToOpenedFile() {
-            if (!openedFileHandle) { setStatus("No file handle: use Open file / Save As"); return; }
+            if (!openedFileHandle) { exportMarkdown(); return; }
             if (saveInFlight) return;
             saveInFlight = true;
 
@@ -609,28 +621,28 @@
             }
         }
 
-        async function saveAsFs() {
-            if (!FS_SUPPORTED || !SECURE) {
-                setStatus("Save As blocked: needs https:// or http://localhost");
-                return;
-            }
-            try {
-                const handle = await window.showSaveFilePicker({
-                    suggestedName: sanitizeFilename(filenameInput.value),
-                    types: [{
-                        description: "Markdown",
-                        accept: { "text/markdown": [".md", ".markdown"], "text/plain": [".txt"] }
-                    }]
-                });
-                if (!handle) return;
-
-                openedFileHandle = handle;
-                lastSavedText = "";
-                updateFsButtons();
-                await saveToOpenedFile();
-            } catch (e) {
-                if (e?.name === "AbortError") return;
-                errlog(e, "Save As");
+        async function saveAs() {
+            if (canUseFS) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: sanitizeFilename(filenameInput.value),
+                        types: [{
+                            description: "Markdown",
+                            accept: { "text/markdown": [".md", ".markdown"], "text/plain": [".txt"] }
+                        }]
+                    });
+                    if (!handle) return;
+                    openedFileHandle = handle;
+                    lastSavedText = "";
+                    updateButtons();
+                    await saveToOpenedFile();
+                } catch (e) {
+                    if (e?.name === "AbortError") return;
+                    errlog(e, "Save As");
+                }
+            } else {
+                // Fallback: download
+                exportMarkdown();
             }
         }
 
@@ -640,19 +652,45 @@
             saveTimer = setTimeout(() => { saveToOpenedFile(); }, 700);
         }
 
-        // ---------- Fallback loader ----------
-        async function loadFromFileInput(file) {
-            if (!file) return;
-            const text = await file.text();
-            editor.value = text;
-            if (file.name) filenameInput.value = sanitizeFilename(file.name);
-            openedFileHandle = null;
-            lastSavedText = "";
-            updateFsButtons();
-            setStatus("Loaded (fallback): no autosave-to-disk");
-            saveDraft();
-            scheduleUiUpdate();
-        }
+        // ---------- Drag & drop ----------
+        let dragCounter = 0;
+        document.addEventListener("dragenter", (e) => {
+            e.preventDefault();
+            dragCounter++;
+            document.body.classList.add("drag-over");
+        });
+        document.addEventListener("dragleave", (e) => {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter <= 0) { dragCounter = 0; document.body.classList.remove("drag-over"); }
+        });
+        document.addEventListener("dragover", (e) => { e.preventDefault(); });
+        document.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            dragCounter = 0;
+            document.body.classList.remove("drag-over");
+
+            // Try to get a file handle for autosave (Chrome/Edge)
+            if (canUseFS && e.dataTransfer.items && e.dataTransfer.items[0]) {
+                const item = e.dataTransfer.items[0];
+                if (typeof item.getAsFileSystemHandle === "function") {
+                    try {
+                        const handle = await item.getAsFileSystemHandle();
+                        if (handle && handle.kind === "file") {
+                            const file = await handle.getFile();
+                            loadFileContent(await file.text(), file.name, handle);
+                            return;
+                        }
+                    } catch (err) { log("Handle from drop failed, falling back", err); }
+                }
+            }
+
+            // Fallback: read via File object (no autosave)
+            const file = e.dataTransfer.files && e.dataTransfer.files[0];
+            if (file) {
+                loadFileContent(await file.text(), file.name, null);
+            }
+        });
 
         // ---------- Events ----------
         toggleBtn.addEventListener("click", () => {
@@ -660,14 +698,12 @@
             toggleModePreserveScroll(isPreview ? "raw" : "preview");
         });
 
-        exportBtn.addEventListener("click", exportMarkdown);
-
         clearBtn.addEventListener("click", () => {
             editor.value = "";
             openedFileHandle = null;
             lastSavedText = "";
-            updateFsButtons();
-            setStatus("Cleared (no file opened)");
+            updateButtons();
+            setStatus("Cleared");
             saveDraft();
             scheduleUiUpdate();
         });
@@ -699,14 +735,13 @@
             }
         });
 
-        openFsBtn.addEventListener("click", openFileFs);
-        saveFsBtn.addEventListener("click", saveToOpenedFile);
-        saveAsFsBtn.addEventListener("click", saveAsFs);
+        openBtn.addEventListener("click", openFile);
+        saveBtn.addEventListener("click", saveToOpenedFile);
+        saveAsBtn.addEventListener("click", saveAs);
 
-        loadBtn.addEventListener("click", () => fileInput.click());
         fileInput.addEventListener("change", async () => {
             const file = fileInput.files && fileInput.files[0];
-            await loadFromFileInput(file);
+            if (file) loadFileContent(await file.text(), file.name, null);
             fileInput.value = "";
         });
 
@@ -724,12 +759,12 @@
         scheduleUiUpdate();
         setMode("raw");
 
-        contextHint.textContent =
-            `Secure context: ${SECURE ? "YES" : "NO"} | FS API: ${FS_SUPPORTED ? "YES" : "NO"} (Open/Save needs https:// or http://localhost)`;
+        contextHint.textContent = canUseFS
+            ? "Autosave supported — open or drag a file to start"
+            : "Open or drag a file to start — save downloads a copy";
 
-        updateFsButtons();
-        if (!SECURE) setStatus("Open/Save disabled: run on http://localhost or https://");
-        else setStatus("No file opened");
+        updateButtons();
+        setStatus("No file opened");
         log("Init. isSecureContext=", SECURE, "FS_SUPPORTED=", FS_SUPPORTED);
 
         // Just in case fonts/layout settle after first paint:
